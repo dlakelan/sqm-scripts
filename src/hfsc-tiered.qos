@@ -38,7 +38,10 @@ ipt_setup() {
             ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS3 -j CLASSIFY --set-class 1:4
             ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS4 -j CLASSIFY --set-class 1:3
             ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class AF41 -j CLASSIFY --set-class 1:3	    
-            ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS5 -j CLASSIFY --set-class 1:2
+
+	    ## in a world where drr or qfq were available, we could sub-classify the real-time traffic
+	    ## but for now pfifo all of it, so it's all the same class
+	    ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS5 -j CLASSIFY --set-class 1:2
             ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS6 -j CLASSIFY --set-class 1:2
             ipt -t mangle -A QOS_MARK_${IFACE} -m dscp --dscp-class CS7 -j CLASSIFY --set-class 1:2
             ;;
