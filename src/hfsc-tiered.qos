@@ -80,65 +80,74 @@ ipt_setup() {
 
 
 
-cake_egress()
-{
-    $TC qdisc add dev $IFACE root `get_stab_string` $QDISC bandwidth ${CEIL}kbit `get_cake_lla_string` ${EQDISC_OPTS}
-}
+hfsc_queue() {
 
-egress() {
-
-    CEIL=${UPLINK}
+    RATE=$1
+    DEV=$2
     
-    RTRATE=$((UPLINK*10/100))
-    HIGHRATE=$((UPLINK*20/100))
-    MEDRATE=$((UPLINK*50/100))
-    LOWRATE=$((UPLINK*15/100))
-    BULKRATE=$((UPLINK*5/100))
-
-    $TC qdisc add dev $IFACE root handle 1: `get_stab_string` hfsc default 4
-    $TC class add dev $IFACE parent 1: classid 1:1 hfsc ls m2 ${CEIL}kbit ul m2 ${CEIL}kbit
-    $TC class add dev $IFACE parent 1:1 classid 1:2 hfsc rt m1 "$((UPLINK*9/10))kbit" d 80ms m2 ${RTRATE}kbit
-    $TC class add dev $IFACE parent 1:1 classid 1:3 hfsc ls m1 "$((UPLINK*60/100))kbit" d 80ms m2 ${HIGHRATE}kbit
-    $TC class add dev $IFACE parent 1:1 classid 1:4 hfsc ls m1 "$((UPLINK*30/100))kbit" d 80ms m2 ${MEDRATE}kbit
-    $TC class add dev $IFACE parent 1:1 classid 1:5 hfsc ls m1 "$((UPLINK*5/100))kbit" d 80ms m2 ${LOWRATE}kbit
-    $TC class add dev $IFACE parent 1:1 classid 1:6 hfsc ls m1 "$((UPLINK*5/10))kbit" d 80ms m2 ${BULKRATE}kbit
-
-}
-
-
-cake_ingress()
-{
-    CAKEARGS=
-    [ "$IGNORE_DSCP_INGRESS" = "1" ] && CAKEARGS="$CAKEARGS besteffort"
-    $TC qdisc add dev $DEV root `get_stab_string` $QDISC bandwidth ${DOWNLINK}kbit \
-        $CAKEARGS `get_cake_lla_string` ${IQDISC_OPTS}
-
-    $IP link set dev $DEV up
-
-    # redirect all IP packets arriving in $IFACE to $DEV
-
-    $TC filter add dev $IFACE parent ffff: protocol all prio 10 u32 \
-        match u32 0 0 flowid 1:1 action mirred egress redirect dev $DEV
-}
-
-ingress() {
-
-
-    CEIL=${UPLINK}
-    
-    RTRATE=$((UPLINK*10/100))
-    HIGHRATE=$((UPLINK*20/100))
-    MEDRATE=$((UPLINK*50/100))
-    LOWRATE=$((UPLINK*15/100))
-    BULKRATE=$((UPLINK*5/100))
+    RTRATE=$((RATE*10/100))
+    HIGHRATE=$((RATE*20/100))
+    MEDRATE=$((RATE*50/100))
+    LOWRATE=$((RATE*15/100))
+    BULKRATE=$((RATE*5/100))
 
     $TC qdisc add dev $DEV root handle 1: `get_stab_string` hfsc default 4
-    $TC class add dev $DEV parent 1: classid 1:1 hfsc ls m2 ${CEIL}kbit ul m2 ${CEIL}kbit
-    $TC class add dev $DEV parent 1:1 classid 1:2 hfsc rt m1 "$((UPLINK*9/10))kbit" d 80ms m2 ${RTRATE}kbit
-    $TC class add dev $DEV parent 1:1 classid 1:3 hfsc ls m1 "$((UPLINK*60/100))kbit" d 80ms m2 ${HIGHRATE}kbit
-    $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((UPLINK*30/100))kbit" d 80ms m2 ${MEDRATE}kbit
-    $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((UPLINK*5/100))kbit" d 80ms m2 ${LOWRATE}kbit
-    $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((UPLINK*5/10))kbit" d 80ms m2 ${BULKRATE}kbit
+    $TC class add dev $DEV parent 1: classid 1:1 hfsc ls m2 ${RATE}kbit ul m2 ${RATE}kbit
+
+    ## the realtime class will use up to 90% of your uplink speed for up to
+    ## 80ms, in order to reduce latency on bursty traffic. But it's limited to
+    ## at most $RTRATE kbit long-term whenever a packet is available on the rt
+    ## class, the rt class is scheduled instead of the link share classes, only
+    ## if it can't send do link-share classes go
+    
+    $TC class add dev $DEV parent 1:1 classid 1:2 hfsc rt m1 "$((RATE*90/100))kbit" d 80ms m2 ${RTRATE}kbit
+
+    FIFOLEN=$((1 + RATE * 80 / (500*8))) ## ~ how many 500byte packets can we dump in 80ms?
+    
+    $TC qdisc add dev $DEV parent 1:2 pfifo limit $FIFOLEN
+    
+    ## remaining classes are non-realtime but 1:3, 1:4, 1:5, 1:6 each have
+    ## progressively reduced latency.
+
+    ## 1:4 is for most traffic and guaranteed at least 50% of link-share with
+    ## full contention
+
+    ## 1:3 will generally give better latency but is limited to only 20% of
+    ## link-share at full contention.  1:4 will throttle down to 5% for 80ms to
+    ## give other classes better latency but still get 15% of link long term 1:5
+    ## will throttle all the way down to 1% of link to give other classes better
+    ## latency and only gets 5% long term
+
+    ## under contention between a more limited number of classes, everything
+    ## re-scales. for example under contention between 1:4 and 1:6, long term
+    ## 1:4 gets MEDRATE/(MEDRATE + BULKRATE) of link and 1:6 gets the rest
+    ## similar balancing occurs during the initial 80ms bursts
+
+    ## we choose 80ms burst time because of a variety of things. At the human
+    ## scale, an eye-blink is about 100ms so this period is considered small but
+    ## noticeable. Also most VOIP works with 20ms between packets, so 80ms is a
+    ## small multiple of this time. Finally, at 500kbps "slow" DSL one MTU
+    ## packet takes about 24ms so it's a small multiple of the serialization
+    ## delay. 
+    
+    $TC class add dev $DEV parent 1:1 classid 1:3 hfsc ls m1 "$((RATE*60/100))kbit" d 80ms m2 ${HIGHRATE}kbit
+    $TC qdisc add dev $DEV parent 1:3 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
+    $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((RATE*34/100))kbit" d 80ms m2 ${MEDRATE}kbit
+    $TC qdisc add dev $DEV parent 1:4 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
+    $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((RATE*5/100))kbit" d 80ms m2 ${LOWRATE}kbit
+    $TC qdisc add dev $DEV parent 1:5 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
+    $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((RATE*1/10))kbit" d 80ms m2 ${BULKRATE}kbit
+    $TC qdisc add dev $DEV parent 1:6 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
+
+}
+
+egress(){
+    hfsc_queue $UPLINK $IFACE
+}
+
+
+ingress() {
+    hfsc_queue $DOWNLINK $DEV
 
     $IP link set dev $DEV up
 
@@ -151,6 +160,6 @@ ingress() {
 
 sqm_prepare_script() {
     do_modules
-    verify_qdisc "htb" || return 1
+    verify_qdisc "hfsc" || return 1
     ipt_setup
 }
