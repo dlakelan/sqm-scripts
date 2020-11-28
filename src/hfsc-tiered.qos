@@ -94,33 +94,62 @@ hfsc_queue() {
     LOWRATE=$((RATE*15/100))
     BULKRATE=$((RATE*5/100))
 
+    REDMIN=$((RATE * 90/100 * 10/8)) ##bytes in 10ms of packets at burst rate
+
+    
+    if [ $((REDMIN < 1500)) ]; then
+	REDMIN=1500
+    fi
+    DUR=$((REDMIN*8*10/RATE/9))
+    if [ $((DUR < 25)) eq 1 ]; then
+	DUR=25
+    fi
+
+    ## we allow at least 25ms of burst time, since this is more than
+    ## the interarrival time of VOIP packets, and more than the
+    ## interarrival time for 60Hz game packets. This means a
+    ## backlogged realtime queue can normally be emptied.
+
+    ## We also expand our duration for slow connections so that we can
+    ## always at least send one MTU at the burst rate.
+
+    
     $TC qdisc add dev $DEV root handle 1: `get_stab_string` hfsc default 4
     $TC class add dev $DEV parent 1: classid 1:1 hfsc ls m2 ${RATE}kbit ul m2 ${RATE}kbit
 
     ## the realtime class will use up to 90% of your uplink speed for up to
-    ## 80ms, in order to reduce latency on bursty traffic. But it's limited to
+    ## DUR ms, in order to reduce latency on bursty traffic. But it's limited to
     ## at most $RTRATE kbit long-term whenever a packet is available on the rt
     ## class, the rt class is scheduled instead of the link share classes, only
     ## if it can't send do link-share classes go
     
-    $TC class add dev $DEV parent 1:1 classid 1:2 hfsc rt m1 "$((RATE*90/100))kbit" d 80ms m2 ${RTRATE}kbit
+    $TC class add dev $DEV parent 1:1 classid 1:2 hfsc rt m1 "$((RATE*90/100))kbit" d ${DUR}ms m2 ${RTRATE}kbit
 
-    ## we're not going to use a PFIFO / BFIFO here, we'll use RED
-    ## which is like a FIFO up to a point, and then it becomes a
-    ## probabilistically lossy FIFO. We limit the max queue length to
-    ## 20ms worth of bytes, but at least 1500 bytes
+    ## we'll use RED which is like a FIFO up to a point, and then it
+    ## becomes a probabilistically lossy FIFO. This lossiness is an
+    ## indicator that our realtime streams are exceeding their
+    ## allotted RTRATE, and RED throttles them. Since this realtime
+    ## stuff is expected to be mainly UDP, the streams are not
+    ## responsive, and we simply drop packets to eliminate them rather
+    ## than to signal
+
+    REDMAX=$((REDMIN + RATE*30/8))
+    ## always use 30ms above the minimum as the max queue len,
+    ## regardless of speed.  we treat the realtime queue like a FIFO
+    ## for up to REDMIN of packets, once it gets beyond REDMIN of
+    ## packets we ramp up the drop probability until it's 100% drop at
+    ## REDMIN + 30ms worth of packets.  This ensures that even with
+    ## misbehaving realtime streams our bufferbloat never gets
+    ## dramatically above 30ms. it's the job of HFSC to burst-send
+    ## fast enough to drain this queue when streams don't
+    ## misbehave... so RED's job is to throttle misbehaving realtime
+    ## streams by random dropping. If the total stream behaves
+    ## properly, the queue should never experience drops
     
-    REDMIN=$((RATE * 90/100 * 5/8)) ##bytes in 5ms of packets
-    if [ $REDMIN < 1500 ]; then
-	REDMIN=1500 ## always at least 1500 bytes
-    fi
-    REDMAX=$((REDMIN * 4))
-    ## we treat the realtime queue like a FIFO with 5ms of packets... once it gets beyond 5ms of packets
-    ## we ramp up the drop probability until it's 100% drop at 20ms of packets
     $TC qdisc add dev $DEV parent 1:2 red limit $REDMAX min $REDMIN max $REDMAX probability 1.0
     
     ## remaining classes are non-realtime but 1:3, 1:4, 1:5, 1:6 each have
-    ## progressively reduced latency.
+    ## progressively increased latency.
 
     ## 1:4 is for most traffic and guaranteed at least 50% of link-share with
     ## full contention
@@ -142,15 +171,33 @@ hfsc_queue() {
     ## small multiple of this time. Finally, at 500kbps "slow" DSL one MTU
     ## packet takes about 24ms so it's a small multiple of the serialization
     ## delay. 
+
+    ## the fq_codel can be allowed to have many packets, as these
+    ## streams are less sensitive. We allow 50ms + 3000 bytes of
+    ## packets which at 1Mbps = 9250 bytes, and at 1Gbps = 6.25MB. In
+    ## any case much less than default of 32MB
     
-    $TC class add dev $DEV parent 1:1 classid 1:3 hfsc ls m1 "$((RATE*60/100))kbit" d 80ms m2 ${HIGHRATE}kbit
-    $TC qdisc add dev $DEV parent 1:3 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
-    $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((RATE*34/100))kbit" d 80ms m2 ${MEDRATE}kbit
-    $TC qdisc add dev $DEV parent 1:4 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
-    $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((RATE*5/100))kbit" d 80ms m2 ${LOWRATE}kbit
-    $TC qdisc add dev $DEV parent 1:5 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
-    $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((RATE*1/10))kbit" d 80ms m2 ${BULKRATE}kbit
-    $TC qdisc add dev $DEV parent 1:6 fq_codel limit $((FIFOLEN*10)) quantum $((1500*2))
+    FQLIM=$((3000+RATE*50/8))
+    
+    ## target is the acceptable standing queue delay. Since none of
+    ## these are super lag sensitive we can scale this up a
+    ## little. The more packets fq_codel has to play with, the better
+    ## it can determine who the bulky flows are. We do the larger of
+    ## 10ms or 2MTU transfers
+    
+    TARG=$((2*1500*8/RATE))
+    if [ $((TARG < 10)) eq 1 ]; then
+	TARG=10
+    fi
+    
+    $TC class add dev $DEV parent 1:1 classid 1:3 hfsc ls m1 "$((RATE*60/100))kbit" d ${DUR}ms m2 ${HIGHRATE}kbit
+    $TC qdisc add dev $DEV parent 1:3 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((RATE*34/100))kbit" d ${DUR}ms m2 ${MEDRATE}kbit
+    $TC qdisc add dev $DEV parent 1:4 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((RATE*5/100))kbit" d ${DUR}ms m2 ${LOWRATE}kbit
+    $TC qdisc add dev $DEV parent 1:5 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((RATE*1/10))kbit" d ${DUR}ms m2 ${BULKRATE}kbit
+    $TC qdisc add dev $DEV parent 1:6 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
 
 }
 
