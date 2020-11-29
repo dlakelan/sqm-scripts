@@ -146,7 +146,7 @@ hfsc_queue() {
     ## streams by random dropping. If the total stream behaves
     ## properly, the queue should never experience drops
     
-    $TC qdisc add dev $DEV parent 1:2 red limit $REDMAX min $REDMIN max $REDMAX probability 1.0
+    $TC qdisc add dev $DEV parent 1:2 red limit $REDMAX min $REDMIN max $REDMAX avpkt 500 bandwidth $RATE probability 1.0
     
     ## remaining classes are non-realtime but 1:3, 1:4, 1:5, 1:6 each have
     ## progressively increased latency.
