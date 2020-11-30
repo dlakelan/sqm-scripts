@@ -90,7 +90,11 @@ hfsc_queue() {
     DEV=$2
     UPDOWN=$3 # either "ingress" or "egress" indicating we're downstream or upstream of the slow link
     
-    RTRATE=$((RATE*10/100))
+    RTRATE=$((600 + RATE*10/100))
+    if [ $RTRATE -gt $((RATE*65/100)) ]
+       echo "Warning, you are in the low bandwidth regime, games will struggle, doing our best!"
+       RTRATE=$((RATE*65/100))
+    fi
     HIGHRATE=$((RATE*20/100))
     MEDRATE=$((RATE*50/100))
     LOWRATE=$((RATE*15/100))
