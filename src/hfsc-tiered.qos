@@ -97,11 +97,11 @@ hfsc_queue() {
     REDMIN=$((RATE * 90/100 * 10/8)) ##bytes in 10ms of packets at burst rate
 
     
-    if [ $((REDMIN < 1500)) ]; then
-	REDMIN=1500
+    if [ $((REDMIN < 3000)) ]; then
+	REDMIN=3000 # always allow at least 2 MTU packets
     fi
     DUR=$((REDMIN*8*10/RATE/9))
-    if [ $((DUR < 25)) eq 1 ]; then
+    if [ $((DUR < 25)) -eq 1 ]; then
 	DUR=25
     fi
 
@@ -134,6 +134,9 @@ hfsc_queue() {
     ## than to signal
 
     REDMAX=$((REDMIN + RATE*30/8))
+    if [ $((REDMAX < 6000)) -eq 1 ]; then
+	REDMAX=6000 ## always allow at least 4 MTU packets
+    fi
     ## always use 30ms above the minimum as the max queue len,
     ## regardless of speed.  we treat the realtime queue like a FIFO
     ## for up to REDMIN of packets, once it gets beyond REDMIN of
@@ -177,27 +180,36 @@ hfsc_queue() {
     ## packets which at 1Mbps = 9250 bytes, and at 1Gbps = 6.25MB. In
     ## any case much less than default of 32MB
     
-    FQLIM=$((3000+RATE*50/8))
+    FQLIM=$((3000+RATE*30/8))
     
-    ## target is the acceptable standing queue delay. Since none of
-    ## these are super lag sensitive we can scale this up a
-    ## little. The more packets fq_codel has to play with, the better
-    ## it can determine who the bulky flows are. We do the larger of
-    ## 10ms or 2MTU transfers
+    ## target is the acceptable standing queue delay. The more packets
+    ## fq_codel has to play with, the better it can determine who the
+    ## bulky flows are. However as speed declines towards zero we want
+    ## to expand our target to allow for at least 2 packets in the
+    ## queue.
+
     
     TARG=$((2*1500*8/RATE))
-    if [ $((TARG < 10)) eq 1 ]; then
-	TARG=10
+    if [ $((TARG < 5)) -eq 1 ]; then
+	TARG=5
     fi
+
+    INTVL=$((100 + 2*1500*8/RATE)) ## interval of 100ms works well for
+				   ## most reasonably high speed
+				   ## links... for slower links we
+				   ## want to expand it by the time to
+				   ## send at least two MTU packets
+				   ## which can be a large fraction of
+				   ## 100ms for slow links
     
     $TC class add dev $DEV parent 1:1 classid 1:3 hfsc ls m1 "$((RATE*60/100))kbit" d ${DUR}ms m2 ${HIGHRATE}kbit
-    $TC qdisc add dev $DEV parent 1:3 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC qdisc add dev $DEV parent 1:3 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
     $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((RATE*34/100))kbit" d ${DUR}ms m2 ${MEDRATE}kbit
-    $TC qdisc add dev $DEV parent 1:4 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC qdisc add dev $DEV parent 1:4 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
     $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((RATE*5/100))kbit" d ${DUR}ms m2 ${LOWRATE}kbit
-    $TC qdisc add dev $DEV parent 1:5 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC qdisc add dev $DEV parent 1:5 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
     $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((RATE*1/10))kbit" d ${DUR}ms m2 ${BULKRATE}kbit
-    $TC qdisc add dev $DEV parent 1:6 fq_codel memory_limit $FQLIM target ${TARG}ms quantum $((1500*2)) ecn
+    $TC qdisc add dev $DEV parent 1:6 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
 
 }
 
