@@ -87,6 +87,7 @@ hfsc_queue() {
 
     RATE=$1
     DEV=$2
+    UPDOWN=$3 # either "ingress" or "egress" indicating we're downstream or upstream of the slow link
     
     RTRATE=$((RATE*10/100))
     HIGHRATE=$((RATE*20/100))
@@ -207,19 +208,32 @@ hfsc_queue() {
     $TC class add dev $DEV parent 1:1 classid 1:4 hfsc ls m1 "$((RATE*34/100))kbit" d ${DUR}ms m2 ${MEDRATE}kbit
     $TC qdisc add dev $DEV parent 1:4 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
     $TC class add dev $DEV parent 1:1 classid 1:5 hfsc ls m1 "$((RATE*5/100))kbit" d ${DUR}ms m2 ${LOWRATE}kbit
-    $TC qdisc add dev $DEV parent 1:5 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
     $TC class add dev $DEV parent 1:1 classid 1:6 hfsc ls m1 "$((RATE*1/10))kbit" d ${DUR}ms m2 ${BULKRATE}kbit
-    $TC qdisc add dev $DEV parent 1:6 fq_codel memory_limit $FQLIM interval ${INTVL}ms target ${TARG}ms quantum $((1500*2)) ecn
 
+    case $UPDOWN in
+	"egress")
+	    ## we're upstream of the slow link, so we can backlog packets for a long time to preserve work without affecting
+	    ## important delays since these are delay insensitive streams by design, also we can expand the memory limit
+	    $TC qdisc add dev $DEV parent 1:5 fq_codel memory_limit $((FQLIM*2)) interval ${INTVL}ms target "$((2*TARG))ms" quantum $((1500*2)) ecn
+	    $TC qdisc add dev $DEV parent 1:6 fq_codel memory_limit $((FQLIM*4)) interval ${INTVL}ms target "$((4*TARG))ms" quantum $((1500*4)) ecn
+	    ;;
+	"ingress")
+	    ## we're downstream of the slow link, so we want to throttle these quickly so they open up room for our
+	    ## higher priority traffic to traverse the slow link.
+	    $TC qdisc add dev $DEV parent 1:5 red limit $REDMAX min $REDMIN max $REDMAX avpkt 500 bandwidth $RATE probability 1.0
+	    $TC qdisc add dev $DEV parent 1:6 red limit $REDMAX min $REDMIN max $REDMAX avpkt 500 bandwidth $RATE probability 1.0
+	    ;;
+    esac
+    
 }
 
 egress(){
-    hfsc_queue $UPLINK $IFACE
+    hfsc_queue $UPLINK $IFACE egress
 }
 
 
 ingress() {
-    hfsc_queue $DOWNLINK $DEV
+    hfsc_queue $DOWNLINK $DEV ingress
 
     $IP link set dev $DEV up
 
