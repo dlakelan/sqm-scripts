@@ -1,0 +1,31 @@
+The basic idea is this:
+
+Place UDP flows associated with games or VOIP or NTP or other realtime
+control into class 1:2 by marking with EF, CS5, CS6, or CS7. You might
+also consider setting EF or CS5 on DNS lookups if you've got the
+bandwidth headroom. You might also consider using a -m connbytes type
+IPtables match which matches udp streams with average packet size less
+than say 400 bytes. This is a good "automated" way to catch streams
+that are mainly sending timely information.
+
+Place interactive video streams, TV service, and other more bulky
+streams that you want to be "quick" into 1:3 by marking with AF41 or
+CS4, also you might consider DNS lookups if your realtime bandwidth is
+squeezed. 
+
+The default will be 1:4 and is good for general web browsing. All
+packets marked CS0 or CS3 will go here, and packets with other random
+marks not mentioned elsewhere.
+
+1:5 is good for bulk data transfers such as perhaps longer running web
+browser transfers (transfers taking more than say 5 seconds). Useful
+to use a conntrack policy based on bytes transferred, but watch out
+not to reclassify long running video conferences etc. Place streams in
+this class by marking CS2
+
+1:6 is good for very long transfers, such as torrents, or downloading
+patches from Microsoft or downloading bootable linux images etc, those
+taking more than ~30 seconds. Again useful for a conntrack policy
+based on bytes transferred. Place streams in this class by marking
+CS1.
+
